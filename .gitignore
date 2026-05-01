@@ -1,0 +1,11 @@
+# 環境変数ファイル
+.env
+.env.local
+
+# GASの認証情報
+.clasp.json
+credentials.json
+
+# OS・エディタのゴミファイル
+.DS_Store
+Thumbs.db

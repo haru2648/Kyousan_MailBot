@@ -5,6 +5,8 @@ on:
     branches: [master]
     paths:
       - 'GAS.js'
+      - 'appsscript.json'
+  workflow_dispatch:
 
 jobs:
   deploy:

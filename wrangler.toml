@@ -1,0 +1,9 @@
+name = "discord-mail-bot"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# ⚠️ [vars] セクションはここに追加しないでください。
+# PUBLIC_KEY / BOT_TOKEN / CHANNEL_ID などは Cloudflare Dashboard の
+# Settings > Variables and Secrets で設定したものがそのまま使われます。
+# wrangler.toml に [vars] を書いて deploy すると、Dashboard側の値が
+# 上書き・削除される可能性があるため注意してください。

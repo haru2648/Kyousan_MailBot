@@ -1,15 +1,22 @@
 // ============================================================
 // Cloudflare Worker - Discord メール通知Bot
 // 環境変数 (Dashboard > Settings > Variables and Secrets):
-//   PUBLIC_KEY         : Discord Bot の公開鍵
-//   BOT_TOKEN          : Discord Bot トークン
-//   CHANNEL_ID         : メール通知用フォーラムチャンネルID
-//   GUILD_ID           : DiscordサーバーID
-//   TAG_UNRESOLVED     : 【未対応】タグID
-//   TAG_PROGRESS       : 【対応中】タグID
-//   TAG_COMPLETED      : 【完了】タグID
-//   GAS_SECRET         : GASと共有するHMACシークレット
-//   SUMMARY_CHANNEL_ID : 日次サマリー投稿先のリマインドチャンネルID
+//   PUBLIC_KEY              : Discord Bot の公開鍵
+//   BOT_TOKEN               : Discord Bot トークン
+//   CHANNEL_ID              : デフォルトのメール通知用フォーラムチャンネルID
+//   GUILD_ID                : DiscordサーバーID
+//   TAG_UNRESOLVED          : デフォルトチャンネルの【未対応】タグID
+//   TAG_PROGRESS            : デフォルトチャンネルの【対応中】タグID
+//   TAG_COMPLETED           : デフォルトチャンネルの【完了】タグID
+//   GAS_SECRET              : GASと共有するHMACシークレット
+//   SUMMARY_CHANNEL_ID      : 日次サマリー投稿先のリマインドチャンネルID
+//   DONATION_TAG_UNRESOLVED : 寄付用チャンネルの【未対応】タグID
+//   DONATION_TAG_PROGRESS   : 寄付用チャンネルの【対応中】タグID
+//   DONATION_TAG_COMPLETED  : 寄付用チャンネルの【完了】タグID
+//
+// ※ DONATION_CHANNEL_ID は不要です。削除してください。
+//    投稿先チャンネルはGASの管理シートD列で管理します。
+//    タグの切り替えはスレッドの parent_id で自動判定します。
 // ============================================================
 
 // -------------------------------------------------------
@@ -107,7 +114,29 @@ async function verifyGasRequest(bodyText, gasSignature, gasTimestamp, secret) {
     console.warn('GAS HMAC mismatch');
     return new Response('Forbidden', { status: 403 });
   }
-  return null; // 認証OK
+  return null;
+}
+
+// -------------------------------------------------------
+// チャンネルIDに対応するタグIDセットを返す
+// parent_id がデフォルトチャンネル(CHANNEL_ID)であればデフォルトタグ、
+// それ以外（寄付チャンネルなど）であれば DONATION_TAG_* を使用する
+// -------------------------------------------------------
+function getTagIds(parentId, env) {
+  if (parentId && parentId !== env.CHANNEL_ID) {
+    // デフォルト以外のチャンネル → 寄付用タグを使用
+    return {
+      unresolved: env.DONATION_TAG_UNRESOLVED,
+      progress:   env.DONATION_TAG_PROGRESS,
+      completed:  env.DONATION_TAG_COMPLETED
+    };
+  }
+  // デフォルトチャンネル
+  return {
+    unresolved: env.TAG_UNRESOLVED,
+    progress:   env.TAG_PROGRESS,
+    completed:  env.TAG_COMPLETED
+  };
 }
 
 // -------------------------------------------------------
@@ -119,21 +148,21 @@ const BTN_RESET    = { type: 2, style: 2, label: "未対応に戻す", custom_id
 
 const STATE = {
   btn_start: {
-    targetTag:     'TAG_PROGRESS',
+    tagKey:        'progress',
     titleStatus:   '【対応中】',
     color:         16776960,
     components:    [{ type: 1, components: [BTN_COMPLETE, BTN_RESET] }],
     shouldArchive: false
   },
   btn_complete: {
-    targetTag:     'TAG_COMPLETED',
+    tagKey:        'completed',
     titleStatus:   '【完了】',
     color:         5763719,
     components:    [{ type: 1, components: [BTN_RESET] }],
     shouldArchive: true
   },
   btn_reset: {
-    targetTag:     'TAG_UNRESOLVED',
+    tagKey:        'unresolved',
     titleStatus:   '【未対応】',
     color:         16711680,
     components:    [{ type: 1, components: [BTN_START, BTN_COMPLETE] }],
@@ -143,8 +172,7 @@ const STATE = {
 
 // -------------------------------------------------------
 // 日次サマリー処理
-// サーバー全体のアクティブスレッドとアーカイブスレッドを取得し
-// タグ別に集計してリマインドチャンネルへBotとして投稿する
+// デフォルトチャンネルと寄付チャンネル両方のスレッドを集計して投稿
 // -------------------------------------------------------
 async function handleSummary(env) {
   if (!env.SUMMARY_CHANNEL_ID) {
@@ -152,8 +180,6 @@ async function handleSummary(env) {
     return new Response('OK', { status: 200 });
   }
 
-  // アクティブスレッド: GUILD_ID経由で取得（フォーラムチャンネルIDでは404になるため）
-  // アーカイブスレッド: チャンネルID経由で取得
   const [activeRes, archivedRes] = await Promise.all([
     discordFetch(`/guilds/${env.GUILD_ID}/threads/active`,              'GET', env.BOT_TOKEN, null),
     discordFetch(`/channels/${env.CHANNEL_ID}/threads/archived/public`, 'GET', env.BOT_TOKEN, null),
@@ -170,17 +196,19 @@ async function handleSummary(env) {
     ...(archivedData.threads ?? []),
   ];
 
-  // タグIDでスレッドを集計
+  // デフォルト・寄付チャンネル両方のタグIDを対象に集計
+  const unresolvedTags = [env.TAG_UNRESOLVED, env.DONATION_TAG_UNRESOLVED].filter(Boolean);
+  const progressTags   = [env.TAG_PROGRESS,   env.DONATION_TAG_PROGRESS  ].filter(Boolean);
+
   let unresolvedCount = 0;
   let progressCount   = 0;
 
   for (const thread of allThreads) {
     const tags = thread.applied_tags ?? [];
-    if (tags.includes(env.TAG_UNRESOLVED)) unresolvedCount++;
-    if (tags.includes(env.TAG_PROGRESS))   progressCount++;
+    if (unresolvedTags.some(t => tags.includes(t))) unresolvedCount++;
+    if (progressTags.some(t =>   tags.includes(t))) progressCount++;
   }
 
-  // 日本時間の今日の日付
   const dateLabel = new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
     month:    'long',
@@ -200,7 +228,6 @@ async function handleSummary(env) {
     lines.push('⚠️ 未対応が5件以上あります。確認をお願いします。');
   }
 
-  // BotとしてリマインドチャンネルへPOST
   const postRes = await discordFetch(
     `/channels/${env.SUMMARY_CHANNEL_ID}/messages`,
     'POST',
@@ -232,7 +259,6 @@ export default {
       const authError = await verifyGasRequest(bodyText, gasSignature, gasTimestamp, env.GAS_SECRET);
       if (authError) return authError;
 
-      // X-GAS-Action: summary の場合はサマリー処理へ
       if (gasAction === 'summary') {
         return handleSummary(env);
       }
@@ -245,16 +271,22 @@ export default {
         return new Response('Bad Request', { status: 400 });
       }
 
+      // GASから指定されたチャンネルID、なければデフォルトを使用
+      const channelId  = data.targetChannelId || env.CHANNEL_ID;
+
+      // 投稿先チャンネルに対応するタグIDを取得
+      const tags       = getTagIds(channelId, env);
+
       const rawTitle   = data?.embeds?.[0]?.title ?? '(件名なし)';
       const threadName = rawTitle.replace('【未対応】', '').trim().slice(0, 100) || '(件名なし)';
 
       const res = await discordFetch(
-        `/channels/${env.CHANNEL_ID}/threads`,
+        `/channels/${channelId}/threads`,
         'POST',
         env.BOT_TOKEN,
         {
           name:         threadName,
-          applied_tags: [env.TAG_UNRESOLVED],
+          applied_tags: [tags.unresolved],
           message: {
             content:    data.content,
             embeds:     data.embeds,
@@ -299,6 +331,11 @@ export default {
       const state = STATE[customId];
       if (!state) return Response.json({ type: 1 });
 
+      // スレッドの parent_id でどちらのチャンネルか判定してタグIDを切り替える
+      const parentId = interaction.channel?.parent_id ?? env.CHANNEL_ID;
+      const tags     = getTagIds(parentId, env);
+      const tagId    = tags[state.tagKey];
+
       ctx.waitUntil(
         new Promise(resolve => setTimeout(resolve, 500)).then(() =>
           discordFetch(
@@ -306,7 +343,7 @@ export default {
             'PATCH',
             env.BOT_TOKEN,
             {
-              applied_tags: env[state.targetTag] ? [env[state.targetTag]] : [],
+              applied_tags: tagId ? [tagId] : [],
               archived:     state.shouldArchive
             }
           )

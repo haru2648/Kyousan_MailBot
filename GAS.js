@@ -24,7 +24,19 @@
 // スプレッドシート「処理ログ」シート:
 //   通知対象になったメールの送信結果のみ記録（デバッグ用）
 //   列: 日時 / メッセージID / 件名 / 送信者 / 判定結果
+//
+// スプレッドシート「ステータス管理」シート:
+//   通知した外部メールのスレッドごとに、返信要否を自動判定して記録する
+//   列: スレッドID / 件名 / 送信者 / 検知日時 / 返信要否（要返信/返信済み） / 最終チェック日時
+//   判定基準: スレッドの最新メッセージの送信者が「設定」シートB2のアドレスなら「返信済み」
+//   「返信済み」から ARCHIVE_AFTER_DAYS 日経過した行は自動で「ステータス管理_アーカイブ」へ移動する
+//
+// スプレッドシート「ステータス管理_アーカイブ」シート:
+//   「ステータス管理」から自動アーカイブされた行の保管先（列は同じ＋アーカイブ日時）
 // ============================================================
+
+// 「返信済み」になってからこの日数が経過した行を自動でアーカイブする
+const ARCHIVE_AFTER_DAYS = 60;
 
 // -------------------------------------------------------
 // HMAC-SHA256 署名を生成してHex文字列で返す
@@ -105,6 +117,111 @@ function logProcessing(ss, msgId, subject, from, status) {
 }
 
 // -------------------------------------------------------
+// 「ステータス管理」シートに返信要否を記録・更新する
+// 同じスレッドが既に記録されている場合は「要返信」に戻して検知日時を更新する
+// （一度返信済みになったスレッドに新着が来た＝再度返信が必要、とみなす）
+// -------------------------------------------------------
+function upsertReplyStatus(ss, threadId, subject, fromAddress) {
+  try {
+    let sheet = ss.getSheetByName('ステータス管理');
+    if (!sheet) {
+      sheet = ss.insertSheet('ステータス管理');
+      sheet.appendRow(['スレッドID', '件名', '送信者', '検知日時', '返信要否', '最終チェック日時']);
+    }
+
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim() === threadId) {
+        sheet.getRange(i + 1, 4).setValue(new Date());
+        sheet.getRange(i + 1, 5).setValue('要返信');
+        return;
+      }
+    }
+    sheet.appendRow([threadId, subject, fromAddress, new Date(), '要返信', '']);
+  } catch (e) {
+    console.error('ステータス管理の更新に失敗:', e.message);
+  }
+}
+
+// -------------------------------------------------------
+// 「ステータス管理」シートの「要返信」行を再チェックし、
+// スレッドの最新メッセージが自分からの送信なら「返信済み」に更新する
+// -------------------------------------------------------
+function updateReplyStatuses(ss, myEmail) {
+  const sheet = ss.getSheetByName('ステータス管理');
+  if (!sheet) return; // まだ1件も記録されていない場合は何もしない
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const threadId = String(data[i][0] ?? '').trim();
+    const status   = String(data[i][4] ?? '').trim();
+    if (!threadId || status !== '要返信') continue;
+
+    try {
+      const thread = GmailApp.getThreadById(threadId);
+      if (!thread) continue;
+
+      const messages = thread.getMessages();
+      const lastMsg  = messages[messages.length - 1];
+      const replied  = lastMsg.getFrom().toLowerCase().includes(myEmail);
+
+      if (replied) {
+        sheet.getRange(i + 1, 5).setValue('返信済み');
+      }
+      sheet.getRange(i + 1, 6).setValue(new Date());
+    } catch (e) {
+      console.error(`スレッド ${threadId} の返信チェックに失敗: ${e.message}`);
+    }
+  }
+}
+
+// -------------------------------------------------------
+// 「ステータス管理」シートの行を「ステータス管理_アーカイブ」シートへ追記する
+// -------------------------------------------------------
+function appendToArchive(ss, rowValues) {
+  let archiveSheet = ss.getSheetByName('ステータス管理_アーカイブ');
+  if (!archiveSheet) {
+    archiveSheet = ss.insertSheet('ステータス管理_アーカイブ');
+    archiveSheet.appendRow(['スレッドID', '件名', '送信者', '検知日時', '返信要否', '最終チェック日時', 'アーカイブ日時']);
+  }
+  archiveSheet.appendRow([...rowValues, new Date()]);
+}
+
+// -------------------------------------------------------
+// 「ステータス管理」シートのうち、「返信済み」になってから
+// ARCHIVE_AFTER_DAYS 日以上経過した行を「ステータス管理_アーカイブ」へ移動する
+// -------------------------------------------------------
+function archiveResolvedStatuses(ss) {
+  const sheet = ss.getSheetByName('ステータス管理');
+  if (!sheet) return;
+
+  try {
+    const data = sheet.getDataRange().getValues();
+    const now  = new Date();
+    const rowsToDelete = [];
+
+    for (let i = 1; i < data.length; i++) {
+      const status    = String(data[i][4] ?? '').trim();
+      const checkedAt = data[i][5];
+      if (status !== '返信済み' || !(checkedAt instanceof Date)) continue;
+
+      const daysSince = (now - checkedAt) / (1000 * 60 * 60 * 24);
+      if (daysSince >= ARCHIVE_AFTER_DAYS) {
+        appendToArchive(ss, data[i]);
+        rowsToDelete.push(i + 1); // シート上の実際の行番号（ヘッダー分+1）
+      }
+    }
+
+    // 後ろの行から削除することで、削除時の行番号ズレを防ぐ
+    for (let j = rowsToDelete.length - 1; j >= 0; j--) {
+      sheet.deleteRow(rowsToDelete[j]);
+    }
+  } catch (e) {
+    console.error('ステータス管理のアーカイブに失敗:', e.message);
+  }
+}
+
+// -------------------------------------------------------
 // メール1件分のDiscord通知ペイロードを生成して返す
 // -------------------------------------------------------
 function buildPayload(targetChannelId, mentionText, subject, fromAddress, bodySnippet, isSpam) {
@@ -164,6 +281,10 @@ function checkMailsAndNotify() {
     throw new Error('設定エラー: 設定シートのB2に自分のメールアドレスを入力してください');
   }
 
+  // 新着メールの有無に関わらず、毎回「要返信」スレッドの再チェックとアーカイブ整理を行う
+  updateReplyStatuses(ss, myEmail);
+  archiveResolvedStatuses(ss);
+
   const mappingData = mappingSheet.getDataRange().getValues();
   const rules = [];
   for (let i = 1; i < mappingData.length; i++) {
@@ -213,7 +334,7 @@ function checkMailsAndNotify() {
 
     if (msgId > lastMessageId) {
       if (!latestMsg.getFrom().toLowerCase().includes(myEmail)) {
-        newMessages.push({ msg: latestMsg, isSpam });
+        newMessages.push({ msg: latestMsg, isSpam, threadId: thread.getId() });
       }
       if (msgId > scanLatestId) scanLatestId = msgId;
     }
@@ -231,7 +352,7 @@ function checkMailsAndNotify() {
   let totalSuccess = 0;
   let totalFail    = 0;
 
-  for (const { msg, isSpam } of newMessages) {
+  for (const { msg, isSpam, threadId } of newMessages) {
     const subject     = msg.getSubject() || '(件名なし)';
     const fromAddress = msg.getFrom();
     const plainBody   = msg.getPlainBody() ?? '';
@@ -327,6 +448,7 @@ function checkMailsAndNotify() {
     logProcessing(ss, msg.getId(), subject, fromAddress,
       `${msgSucceeded ? '送信成功' : '一部失敗'}（${channelLabels.join(' / ')}${spamLabel}）`
     );
+    upsertReplyStatus(ss, threadId, subject, fromAddress);
   }
 
   if (allSucceeded) {

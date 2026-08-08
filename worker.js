@@ -336,6 +336,16 @@ export default {
       const tags     = getTagIds(parentId, env);
       const tagId    = tags[state.tagKey];
 
+      // TODO: タグが消える不具合の一時デバッグログ（原因特定後に削除）
+      console.log('DEBUG tagcheck', {
+        customId,
+        parentId,
+        CHANNEL_ID: env.CHANNEL_ID,
+        tagKey: state.tagKey,
+        tagId,
+        tags
+      });
+
       ctx.waitUntil(
         new Promise(resolve => setTimeout(resolve, 500)).then(() =>
           discordFetch(

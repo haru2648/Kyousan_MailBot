@@ -2,8 +2,21 @@ name = "discord-mail-bot"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
-# ⚠️ [vars] セクションはここに追加しないでください。
-# PUBLIC_KEY / BOT_TOKEN / CHANNEL_ID などは Cloudflare Dashboard の
-# Settings > Variables and Secrets で設定したものがそのまま使われます。
-# wrangler.toml に [vars] を書いて deploy すると、Dashboard側の値が
-# 上書き・削除される可能性があるため注意してください。
+# 機密でない値（Discordの各種ID・Public Key）はここで管理する。
+# wrangler deployは、宣言されていない変数・シークレットをCloudflare側から
+# 削除してしまうため、Dashboardで直接編集するのではなく必ずここを更新すること。
+#
+# BOT_TOKEN と GAS_SECRET はここには書かない（機密情報のため）。
+# GitHub Secretsに登録し、.github/workflows/deploy-worker.ymlの
+# wrangler-actionのsecretsパラメータ経由でデプロイのたびに自動投入される。
+[vars]
+PUBLIC_KEY               = "3a3f1a662e76b7a93e256177e5e864e892a1cb24ee69b4531ec640dcadba5141"
+CHANNEL_ID               = "1499684065190740079"
+GUILD_ID                 = "550183645781164042"
+TAG_UNRESOLVED           = "1499684396301811732"
+TAG_PROGRESS             = "1499684539231113287"
+TAG_COMPLETED            = "1499684667127890023"
+SUMMARY_CHANNEL_ID       = "1252444845574717542"
+DONATION_TAG_UNRESOLVED  = "1526099333252911164"
+DONATION_TAG_PROGRESS    = "1526099435690524722"
+DONATION_TAG_COMPLETED   = "1526099155825594379"

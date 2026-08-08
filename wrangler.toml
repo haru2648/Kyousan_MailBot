@@ -10,7 +10,7 @@ compatibility_date = "2024-09-23"
 # GitHub Secretsに登録し、.github/workflows/deploy-worker.ymlの
 # wrangler-actionのsecretsパラメータ経由でデプロイのたびに自動投入される。
 [vars]
-PUBLIC_KEY               = "3a3f1a662e76b7a93e256177e5e864e892a1cb24ee69b4531ec640dcadba5141"
+PUBLIC_KEY               = "a25e32754e1261df030b8437ff4803b0de53b5daf21161abf189fb6ea767e7c1"
 CHANNEL_ID               = "1499684065190740079"
 GUILD_ID                 = "550183645781164042"
 TAG_UNRESOLVED           = "1499684396301811732"

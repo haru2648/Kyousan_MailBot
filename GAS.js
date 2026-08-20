@@ -15,11 +15,19 @@
 //   A列 : キーワード
 //   C列 : メンション先Discord ID
 //   D列 : 投稿先チャンネルID（空欄の場合はデフォルトの CHANNEL_ID に投稿）
+//   E列 : デフォルトチャンネルにも重複投稿するか（チェックボックス）
+//         空欄/TRUE = D列の専用チャンネルに加えてデフォルトチャンネルにも投稿する（従来の挙動・デフォルト）
+//         FALSE     = 専用チャンネルのみに投稿し、デフォルトチャンネルへは投稿しない
+//         ※D列が空欄の行では意味を持たない
 //
 // 【複数チャンネルへの投稿について】
-//   D列にチャンネルIDが設定されているキーワードにマッチした場合、
-//   そのチャンネルに加えてデフォルトチャンネルにも投稿されます。
-//   例: 「寄付」にマッチ → 寄付チャンネル + デフォルトチャンネルの両方に投稿
+//   D列にチャンネルIDが設定されているキーワードにマッチした場合:
+//     - E列が空欄またはTRUEなら、そのチャンネルに加えてデフォルトチャンネルにも投稿します（従来通り）。
+//     - E列がFALSEなら、専用チャンネルのみに投稿します。
+//   同じメールが複数の専用チャンネルルールにマッチし、E列の値が食い違う場合は、
+//   いずれか1つでも「重複する」側があればデフォルトチャンネルにも投稿します（OR判定）。
+//   例（E=FALSE）: 「寄附」にマッチ → 寄付チャンネルのみに投稿
+//   例（E=空欄） : 「請求書」にマッチ → 請求書チャンネル + デフォルトチャンネルの両方に投稿（従来通り）
 //
 // スプレッドシート「処理ログ」シート:
 //   通知対象になったメールの送信結果のみ記録（デバッグ用）
@@ -293,7 +301,13 @@ function checkMailsAndNotify() {
     const channelId = String(mappingData[i][3] ?? '').trim();
     if (!keyword || !rawId) continue;
     const formattedId = rawId.startsWith('<') ? rawId : `<@${rawId.replace(/[^0-9]/g, '')}>`;
-    rules.push({ keyword, discordId: formattedId, channelId });
+
+    // E列: デフォルトチャンネルへの重複投稿可否。空欄・未設定は true（従来通り重複する）扱いとし、
+    // 明示的にチェックを外した（false）場合のみ重複しない。手入力文字列 'FALSE' にも寛容に対応する。
+    const dupRaw = mappingData[i][4];
+    const duplicateToDefault = !(dupRaw === false || String(dupRaw ?? '').trim().toUpperCase() === 'FALSE');
+
+    rules.push({ keyword, discordId: formattedId, channelId, duplicateToDefault });
   }
 
   // 受信トレイと迷惑メールフォルダを取得してマージ
@@ -371,6 +385,7 @@ function checkMailsAndNotify() {
     // mentionsByChannel: { チャンネルID → Set<メンションID> }
     // チャンネルIDが空 = デフォルトチャンネルとして '' をキーに使う
     const mentionsByChannel = new Map();
+    let duplicateToDefault = false; // このメールで専用チャンネルにマッチしたルールのいずれかがtrueならtrue（OR判定）
 
     for (const rule of rules) {
       if (searchText.includes(rule.keyword.toLowerCase())) {
@@ -380,6 +395,7 @@ function checkMailsAndNotify() {
             mentionsByChannel.set(rule.channelId, new Set());
           }
           mentionsByChannel.get(rule.channelId).add(rule.discordId);
+          if (rule.duplicateToDefault) duplicateToDefault = true;
         }
         // D列にチャンネルIDがない場合 → デフォルトチャンネルに追加
         if (!rule.channelId) {
@@ -407,7 +423,9 @@ function checkMailsAndNotify() {
     }
 
     // デフォルトチャンネルへの投稿
-    // 専用チャンネルにマッチした場合も必ずデフォルトチャンネルに投稿する
+    // - D列なしルールがマッチした場合は必ずそのメンションで投稿（変更なし）
+    // - 専用チャンネルのみにマッチした場合は、E列(duplicateToDefault)が空欄/TRUEのときだけデフォルトにも投稿
+    // - どこにもマッチしなかった場合は、必ずデフォルトメンションでデフォルトチャンネルに投稿（変更なし）
     const defaultMentions = mentionsByChannel.get('');         // D列なしルールのメンション
     const hasSpecialChannel = postTargets.length > 0;          // 専用チャンネルへの投稿があるか
 
@@ -415,8 +433,11 @@ function checkMailsAndNotify() {
       // D列なしのキーワードにマッチ → そのメンションでデフォルトチャンネルに投稿
       postTargets.push({ channelId: null, mentionText: [...defaultMentions].join(' ') });
     } else if (hasSpecialChannel) {
-      // 専用チャンネルのみにマッチ → デフォルトメンションでデフォルトチャンネルにも投稿
-      postTargets.push({ channelId: null, mentionText: defaultMention });
+      if (duplicateToDefault) {
+        // 専用チャンネルのみにマッチし、E列が空欄/TRUE → デフォルトメンションでデフォルトチャンネルにも投稿
+        postTargets.push({ channelId: null, mentionText: defaultMention });
+      }
+      // E列がFALSEの場合はデフォルトチャンネルへの投稿をスキップ（専用チャンネルのみに投稿）
     } else {
       // どこにもマッチしなかった → デフォルトメンションでデフォルトチャンネルのみ
       postTargets.push({ channelId: null, mentionText: defaultMention });
